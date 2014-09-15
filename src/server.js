@@ -5,7 +5,8 @@ var express = require("express");
 var logger = require('morgan');
 var bodyParser = require('body-parser');
 var uuidGen = require('node-uuid');
-var debug = require('debug')('build');
+var Q = require('q');
+var qhttp = require("q-io/http");
 
 var app = express();
 var port = process.env.PORT || 5000;
@@ -17,173 +18,108 @@ app.use(bodyParser.urlencoded({
 }));
 
 var inventories = {};
-var blueprints = require('./blueprints');
-var facilities = {
-    "dummy": {
-        "blueprint": "dummy"
-    }
-};
-var spodb = {
-    "dummy": {
-        "blueprint": "dummy"
-    }
-};
-var buildJobs = {};
 
-app.get('/jobs', function(req, res) {
-    res.send(buildJobs);
-});
+function getSpoDB() {
+    return qhttp.read(process.env.SPODB_URL + '/spodb').then(function(b) {
+        return JSON.parse(b.toString());
+    });
+}
 
-// players cancel jobs
-app.delete('/jobs/:uuid', function(req, res) {
-    // does the user get the resources back?
-    // not supported yet
-    res.sendStatus(404);
-});
+function getBlueprints() {
+    return qhttp.read(process.env.TECHDB_URL + '/blueprints').then(function (b){
+        return JSON.parse(b.toString());
+    });
+}
 
-// players queue jobs
-app.post('/jobs', function(req, res) {
-    var uuid = uuidGen.v1();
-    debug(req.body);
-
-    var example = {
-        "facility": "uuid",
-        "action": "manufacture", // refine, construct
-        "quantity": 3,
-        "target": "blueprintuuid",
-        "inventory": "uuid"
-    };
-
-    var job = req.body;
-    var facility = facilities[job.facility];
-    var facilityType = blueprints[facility.blueprint];
-    var canName = "can" + job.action.charAt(0).toUpperCase() + job.action.slice(1);
-    var canList = facilityType[canName];
-    var target = blueprints[req.body.target];
-    var duration = -1;
-
-    if (canList.indexOf(job.target) == -1) {
-        res.sendStatus(400);
-    }
-
-    if (job.action == "refine") {
-        // verify space in the attached inventory after target is removed
-        consume(job.inventory, job.target, job.quantity);
-        duration = target.refine.time;
-    } else {
-        duration = target.build.time;
-
-        for (var key in target.build.resources) {
-            var count = target.build.resources[key];
-            consume(job.inventory, key, count*job.quantity);
-        }
-
-        if (job.action == "construct") {
-            job.quantity = 1;
-        }
-    }
-
-    job.finishAt = (new Date().getTime() + duration*1000*job.quantity);
-    buildJobs[uuid] = job;
-    res.sendStatus(201);
-});
-
-app.get('/facilities', function(req, res) {
-    res.send(facilities);
-});
-
-app.post('/facilities/:uuid', function(req, res) {
-    // this is when spodb has an update to an existing
-    // facility, not yet supported
-    res.sendStatus(404);
-});
-
-// spodb tells us when facilities come into existance
-app.post('/facilities', function(req, res) {
-    var uuid = req.body.uuid || uuidGen.v1();
-    debug(req.body);
-    var blueprint = blueprints[req.body.blueprint];
-
-    if (blueprint) {
-        facilities[uuid] = req.body;
-        if (blueprint.type == "structure" || blueprint.type == "deployable") {
-            spodb[uuid] = {
-                blueprint: uuid
-            };
-        }
-
-        res.sendStatus(201);
-    } else {
-        res.sendStatus(400);
-    }
-});
-
-// this is just a stub until we build the inventory and emit to it
 app.get('/inventories', function(req, res) {
     res.send(inventories);
 });
 
-// this is just a stub until we build the spodb
-app.get('/spodb', function(req, res) {
-    res.send(spodb);
-});
+app.post('/inventories/:uuid/:slice', function(req, res) {
+    var uuid = req.param('uuid');
+    var sliceID = req.param('slice');
+    var type = req.param('type');
 
-function consume(uuid, type, quantity) {
-    if (inventories[uuid] === undefined) {
-        inventories[uuid] = [];
-    }
+    // We need the blueprints, but if we need the spodb too, get started
+    var blueprintP = getBlueprints();
+    var inventoryP = Q.fcall(function() {
+        // does the uuid exist, what is it's blueprint
+        // how much can the blueprint hold
+        if (inventories[uuid] === undefined) {
+            return Q.all([blueprintP, getSpoDB()])
+            .spread(function(blueprints, spodb) {
+                var spo = spodb[uuid];
+                //console.log(spodb);
+                console.log(blueprints);
+                console.log(spo);
 
-    inventories[uuid].push({
-        blueprint: type,
-        quantity: quantity * -1
-    });
-}
 
-function produce(uuid, type, quantity) {
-    var obj = {
-        blueprint: type,
-        quantity: quantity
-    };
-    debug(obj);
+                if (spo === undefined ||
+                    spo.values.blueprint === undefined ||
+                    blueprints[spo.values.blueprint] === undefined) {
 
-    if (inventories[uuid] === undefined) {
-        inventories[uuid] = [];
-    }
+                    throw new Error("No valid object in spodb");
+                } else {
+                    var b = blueprints[spo.values.blueprint];
 
-    inventories[uuid].push(obj);
-}
+                    inventories[uuid] = {
+                        capacity: {
+                            cargo: b.inventory_capacity || 0,
+                            hanger: b.hanger_capacity || 0,
+                        },
+                        usage: {
+                            cargo: 0,
+                            hanger: 0
+                        },
+                        cargo: {},
+                        hanger: {}
+                    };
 
-var buildWorker = setInterval(function() {
-    var timestamp = new Date().getTime();
-
-    for(var uuid in buildJobs) {
-        var job = buildJobs[uuid];
-        if (job.finishAt < timestamp && job.finished !== true) {
-            debug(job);
-            job.finished = true;
-
-            switch (job.action) {
-                case "manufacture":
-                    produce(job.inventory, job.target, job.quantity);
-                    break;
-                case "refine":
-                    var target = blueprints[job.target];
-                    for (var key in target.refine.outputs) {
-                        var count = target.refine.outputs[key];
-                        produce(job.inventory, key, count*job.quantity);
-                    }
-                    break;
-                case "construct":
-                    // in the end this will notify spodb something
-                    // was changed and spodb will notify us
-                    spodb[job.facility].blueprint = job.target;
-
-                    break;
-            }
-        
+                    return inventories[uuid];
+                }
+            });
+        } else {
+            return inventories[uuid];
         }
-    }
-}, 1000);
+    });
+
+    Q.spread([blueprintP, inventoryP], function(blueprints, inventory) {
+        var slot, blueprint = blueprints[type];
+
+        if (blueprint === undefined) {
+            throw new Error("invalid blueprint: "+type);
+        }
+
+        if (blueprint.type == "spaceship") {
+            slot = "hanger";
+        } else {
+            slot = "cargo";
+        }
+
+        var quantity = req.param("quantity");
+        var volume = quantity * blueprint.volume;
+        if (inventory.usage[slot] + volume > inventory.capacity[slot]) {
+            throw new Error("No room left");
+        } else {
+            inventory.usage[slot] += volume;
+        }
+
+        if (inventory[slot][sliceID] === undefined) {
+            inventory[slot][sliceID] = {};
+        }
+
+        var slice = inventory[slot][sliceID];
+
+        if (slice[type] === undefined) {
+            slice[type] = 0;
+        }
+
+        slice[type] = slice[type] + parseInt(req.param("quantity"));
+        res.send(inventory);
+    }).fail(function(error) {
+        res.status(500).send(error.message);
+    });
+});
 
 var server = http.createServer(app);
 server.listen(port);

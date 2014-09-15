@@ -86,7 +86,8 @@ app.post('/inventories/:uuid/:slice', function(req, res) {
     Q.spread([blueprintP, inventoryP], function(blueprints, inventory) {
         var slot, blueprint = blueprints[type];
 
-        if (blueprint === undefined) {
+        if (blueprint === undefined ||
+            blueprint.volume === undefined) {
             throw new Error("invalid blueprint: "+type);
         }
 

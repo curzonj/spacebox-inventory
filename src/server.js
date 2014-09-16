@@ -99,10 +99,10 @@ app.post('/inventories/:uuid/:slice', function(req, res) {
 
         var quantity = req.param("quantity");
         var volume = quantity * blueprint.volume;
-        if (inventory.usage[slot] + volume > inventory.capacity[slot]) {
+        var final_volume = inventory.usage[slot] + volume;
+
+        if (final_volume > inventory.capacity[slot]) {
             throw new Error("No room left");
-        } else {
-            inventory.usage[slot] += volume;
         }
 
         if (inventory[slot][sliceID] === undefined) {
@@ -115,7 +115,15 @@ app.post('/inventories/:uuid/:slice', function(req, res) {
             slice[type] = 0;
         }
 
-        slice[type] = slice[type] + parseInt(req.param("quantity"));
+        var result = slice[type] + parseInt(req.param("quantity"));
+
+        if (result < 0) {
+            throw new Error("Not enough cargo present")
+        }
+
+        slice[type] = result;
+        inventory.usage[slot] = final_volume;
+
         res.send(inventory);
     }).fail(function(error) {
         res.status(500).send(error.message);

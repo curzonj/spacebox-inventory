@@ -31,11 +31,11 @@ function getBlueprints() {
     });
 }
 
-app.get('/inventories', function(req, res) {
+app.get('/inventory', function(req, res) {
     res.send(inventories);
 });
 
-app.post('/inventories/:uuid/:slice', function(req, res) {
+app.post('/inventory/:uuid/:slice', function(req, res) {
     var uuid = req.param('uuid');
     var sliceID = req.param('slice');
     var type = req.param('type');
@@ -118,7 +118,7 @@ app.post('/inventories/:uuid/:slice', function(req, res) {
         var result = slice[type] + parseInt(req.param("quantity"));
 
         if (result < 0) {
-            throw new Error("Not enough cargo present")
+            throw new Error("Not enough cargo present");
         }
 
         slice[type] = result;

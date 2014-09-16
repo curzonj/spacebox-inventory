@@ -35,6 +35,9 @@ app.get('/inventory', function(req, res) {
     res.send(inventories);
 });
 
+// TODO allow posting a whole bunch at once so we don't have a chatty api
+// app.post('/inventory', 
+
 app.post('/inventory/:uuid/:slice', function(req, res) {
     var uuid = req.param('uuid');
     var sliceID = req.param('slice');

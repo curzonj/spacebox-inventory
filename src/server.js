@@ -36,6 +36,7 @@ app.get('/inventory', function(req, res) {
 });
 
 // TODO allow posting a whole bunch at once so we don't have a chatty api
+// that would also provide for the move function
 // app.post('/inventory', 
 
 app.post('/inventory/:uuid/:slice', function(req, res) {
@@ -52,10 +53,6 @@ app.post('/inventory/:uuid/:slice', function(req, res) {
             return Q.all([blueprintP, getSpoDB()])
             .spread(function(blueprints, spodb) {
                 var spo = spodb[uuid];
-                //console.log(spodb);
-                console.log(blueprints);
-                console.log(spo);
-
 
                 if (spo === undefined ||
                     spo.values.blueprint === undefined ||

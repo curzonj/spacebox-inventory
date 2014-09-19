@@ -10,6 +10,7 @@ var qhttp = require("q-io/http");
 
 var app = express();
 var port = process.env.PORT || 5000;
+var internal = process.env.SHARED_SECRET;
 
 app.use(logger('dev'));
 app.use(bodyParser.json());
@@ -18,6 +19,35 @@ app.use(bodyParser.urlencoded({
 }));
 
 var inventories = {};
+var slice_permissions = {};
+
+function authorize(req) {
+    var auth_header = req.get('Authorization');
+    if (auth_header === undefined) {
+        throw new Error("not authorized");
+    }
+
+    var parts = auth_header.split(' ');
+
+    if (parts[0] != "Bearer") {
+        throw new Error("not authorized");
+    }
+
+    // This will fail if it's not authorized
+    return qhttp.request({
+        method: "POST",
+        url: process.env.AUTH_URL + '/authorized',
+        headers: { "Content-Type": "application/json" },
+        body: [ JSON.stringify({
+            action: req.param('action'),
+            token: parts[1]
+        }) ]
+    }).then(function(res) {
+        if (res.status != 200) {
+            throw new Error("not authorized");
+        }
+    });
+}
 
 function getBlueprints() {
     return qhttp.read(process.env.TECHDB_URL + '/blueprints').then(function(b) {
@@ -94,7 +124,11 @@ function destroyContainer(uuid) {
 }
 
 app.get('/inventory', function(req, res) {
-    res.send(inventories);
+    authorize(req).then(function() {
+        res.send(inventories);
+    }).fail(function(e) {
+        res.status(500).send(e.toString());
+    });
 });
 
 app.get('/inventory/:uuid', function(req, res) {

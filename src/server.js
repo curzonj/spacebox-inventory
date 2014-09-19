@@ -19,116 +19,283 @@ app.use(bodyParser.urlencoded({
 
 var inventories = {};
 
-function getSpoDB() {
-    return qhttp.read(process.env.SPODB_URL + '/spodb').then(function(b) {
+function getBlueprints() {
+    return qhttp.read(process.env.TECHDB_URL + '/blueprints').then(function(b) {
         return JSON.parse(b.toString());
     });
 }
 
-function getBlueprints() {
-    return qhttp.read(process.env.TECHDB_URL + '/blueprints').then(function (b){
-        return JSON.parse(b.toString());
-    });
+// NOTE /containers endpoints are restricted to spodb and production api
+app.delete('/containers/:uuid', function(req, res) {
+    var uuid = req.param('uuid');
+
+    if (inventories[uuid] === undefined) {
+        res.sendStatus(404);
+        return;
+    }
+
+    destroyContainer(uuid);
+
+    res.sendStatus(204);
+});
+
+app.post('/containers/:uuid', function(req, res) {
+    var uuid = req.param('uuid'),
+        blueprintID = req.param('blueprint');
+
+    getBlueprints().then(function(blueprints) {
+        var blueprint = blueprints[blueprintID];
+
+        if (blueprint === undefined) {
+            res.status(400).send("Invalid blueprint");
+        } else if (inventories[uuid] !== undefined) {
+            updateContainer(uuid, blueprint);
+            res.sendStatus(204);
+        } else {
+            buildContainer(uuid, blueprint);
+            res.sendStatus(204);
+        }
+    }).done();
+});
+
+function updateContainer(uuid, newBlueprint) {
+    var i = inventories[uuid],
+        b = newBlueprint;
+
+    i.blueprint = newBlueprint.uuid;
+    i.capacity.cargo = b.inventory_capacity;
+    i.capacity.hanger = b.hanger_capacity;
+}
+
+function buildContainer(uuid, blueprint) {
+    var b = blueprint;
+
+    inventories[uuid] = {
+        blueprint: b.uuid,
+        capacity: {
+            cargo: b.inventory_capacity || 0,
+            hanger: b.hanger_capacity || 0,
+        },
+        usage: {
+            cargo: 0,
+            hanger: 0
+        },
+        cargo: {},
+        hanger: {}
+    };
+}
+
+function destroyContainer(uuid) {
+    if (inventories[uuid] === undefined) {
+        throw new Error("No such inventory");
+    }
+
+    inventories[uuid].tombstone = true;
 }
 
 app.get('/inventory', function(req, res) {
     res.send(inventories);
 });
 
-// TODO allow posting a whole bunch at once so we don't have a chatty api
-// that would also provide for the move function
-// app.post('/inventory', 
+app.get('/inventory/:uuid', function(req, res) {
+    res.send(inventories[req.param('uuid')]);
+});
 
-app.post('/inventory/:uuid/:slice', function(req, res) {
-    var uuid = req.param('uuid');
-    var sliceID = req.param('slice');
-    var type = req.param('type');
+app.post('/ships', function(req, res) {
+    var uuid = uuidGen.v1(),
+        inventoryID = req.param('inventory'),
+        sliceID = req.param('slice'),
+        blueprintID = req.param('blueprint'),
+        inventory = inventories[inventoryID];
 
-    // We need the blueprints, but if we need the spodb too, get started
-    var blueprintP = getBlueprints();
-    var inventoryP = Q.fcall(function() {
-        // does the uuid exist, what is it's blueprint
-        // how much can the blueprint hold
-        if (inventories[uuid] === undefined) {
-            return Q.all([blueprintP, getSpoDB()])
-            .spread(function(blueprints, spodb) {
-                var spo = spodb[uuid];
+    if (inventory === undefined || inventory.hanger[sliceID] === undefined) {
+        res.status(400).send("no such inventory");
+    } else {
+        var slice = inventory.hanger[sliceID];
 
-                if (spo === undefined ||
-                    spo.values.blueprint === undefined ||
-                    blueprints[spo.values.blueprint] === undefined) {
+        if (slice[blueprintID] === undefined || slice[blueprintID] === 0) {
+            throw new Error("no ships present: " + blueprintID);
+        }
 
-                    throw new Error("No valid object in spodb");
-                } else {
-                    var b = blueprints[spo.values.blueprint];
+        getBlueprints().then(function(blueprints) {
+            var blueprint = blueprints[blueprintID];
 
-                    inventories[uuid] = {
-                        capacity: {
-                            cargo: b.inventory_capacity || 0,
-                            hanger: b.hanger_capacity || 0,
-                        },
-                        usage: {
-                            cargo: 0,
-                            hanger: 0
-                        },
-                        cargo: {},
-                        hanger: {}
-                    };
+            if (blueprint === undefined) {
+                res.status(400).send("Invalid blueprint");
+            } else {
+                slice[blueprintID] -= 1;
 
-                    return inventories[uuid];
+                slice.unpacked.push({
+                    uuid: uuid,
+                    blueprint: blueprintID
+                });
+
+                buildContainer(uuid, blueprintID);
+
+                res.sendStatus(201);
+            }
+        }).done();
+    }
+});
+
+// TODO support a schema validation
+app.post('/inventory', function(req, res) {
+    var transactions = [],
+        containers = [];
+
+    getBlueprints().then(function(blueprints) {
+        req.body.forEach(function(t) {
+            if (t.ship_uuid !== undefined) {
+                // TODO lookup the blueprint we have stored
+
+                if (t.quantity != -1 && t.quantity != 1) {
+                    throw new Error("quantity must be 1 or -1 for unpacked ships");
                 }
-            });
-        } else {
-            return inventories[uuid];
+            }
+
+            t.blueprint = blueprints[t.blueprint];
+
+            if (t.container_action !== undefined) {
+                containers.push(t);
+            } else {
+                transactions.push(t);
+            }
+        });
+
+        // validate that the transaction is balanced unless the user is special
+
+        // TODO this should all be in postgres and a database transaction
+        containers.forEach(function(c) {
+            if (c.container_action == "create") {
+                buildContainer(c.uuid, c.blueprint);
+            } else {
+                if (inventories[c.uuid] === undefined) {
+                    throw new Error("no such inventory");
+                }
+
+                destroyContainer(c.uuid);
+            }
+        });
+
+        executeTransfers(transactions);
+
+        res.sendStatus(204);
+    }).done();
+});
+
+function executeTransfers(transfers) {
+    transfers.forEach(function(transfer) {
+        var example = {
+            inventory: 'uuid',
+            slice: 'uuid',
+            quantity: 5,
+            blueprint: {},
+            ship_uuid: 'uuid' // only for unpacked ships and quantity must == -1 or 1
+        };
+
+        var slot;
+        var inventory = inventories[transfer.inventory];
+        var quantity = transfer.quantity;
+        var sliceID = transfer.slice;
+        var type = transfer.blueprint.uuid;
+
+        if (inventory === undefined) {
+            throw new Error("no such inventory: " + transfer.inventory);
         }
-    });
 
-    Q.spread([blueprintP, inventoryP], function(blueprints, inventory) {
-        var slot, blueprint = blueprints[type];
-
-        if (blueprint === undefined ||
-            blueprint.volume === undefined) {
-            throw new Error("invalid blueprint: "+type);
-        }
-
-        if (blueprint.type == "spaceship") {
+        if (transfer.blueprint.type == "spaceship") {
             slot = "hanger";
+
+            if (inventory[slot][sliceID] === undefined) {
+                inventory[slot][sliceID] = {
+                    unpacked: []
+                };
+            }
         } else {
             slot = "cargo";
+
+            if (inventory[slot][sliceID] === undefined) {
+                inventory[slot][sliceID] = {};
+            }
         }
 
-        var quantity = req.param("quantity");
-        var volume = quantity * blueprint.volume;
+        var slice = inventory[slot][sliceID];
+        var volume = quantity * transfer.blueprint.volume;
         var final_volume = inventory.usage[slot] + volume;
 
         if (final_volume > inventory.capacity[slot]) {
             throw new Error("No room left");
         }
 
-        if (inventory[slot][sliceID] === undefined) {
-            inventory[slot][sliceID] = {};
+        if (transfer.ship_uuid !== undefined) {
+            var list = slice.unpacked;
+            if (quantity > 0) {
+                slice.push({
+                    uuid: transfer.ship_uuid,
+                    blueprint: transfer.blueprint.uuid
+                });
+            } else {
+                var i = slice.indexOf(transfer.ship_uuid);
+
+                if (i == -1) {
+                    throw new Error("ship not present in hanger: " + transfer.ship_uuid);
+                } else {
+                    slice.splice(i, 1);
+                }
+            }
+        } else {
+            if (slice[type] === undefined) {
+                slice[type] = 0;
+            }
+
+            var result = slice[type] + transfer.quantity;
+
+            if (result < 0) {
+                throw new Error("Not enough cargo present");
+            }
+
+            slice[type] = result;
         }
 
-        var slice = inventory[slot][sliceID];
-
-        if (slice[type] === undefined) {
-            slice[type] = 0;
-        }
-
-        var result = slice[type] + parseInt(req.param("quantity"));
-
-        if (result < 0) {
-            throw new Error("Not enough cargo present");
-        }
-
-        slice[type] = result;
         inventory.usage[slot] = final_volume;
-
-        res.send(inventory);
-    }).fail(function(error) {
-        res.status(500).send(error.message);
     });
+}
+
+/*
+// This is totally depricated and doesn't support unpacked ships
+app.post('/inventory/:uuid/:slice', function(req, res) {
+    var uuid = req.param('uuid');
+    var sliceID = req.param('slice');
+    var type = req.param('type');
+
+    if (inventories[uuid] === undefined) {
+        res.sendStatus(404);
+        return;
+    }
+
+    getBlueprints().then(function(blueprints) {
+        var blueprint = blueprints[type];
+
+        // TODO executeTransfers should be able to do this
+        // and return the correct errors for the response
+        if (blueprint === undefined ||
+            blueprint.volume === undefined) {
+            res.status(400).send("invalid blueprint: " + type);
+        }
+
+        executeTransfers([{
+            inventory: uuid,
+            slice: sliceID,
+            quantity: parseInt(req.param("quantity")),
+            blueprint: blueprint
+        }]);
+
+        res.send(inventories[uuid]);
+    }).fail(function(e) {
+        res.status(500).send(e.toString());
+    }).done();
 });
+*/
 
 var server = http.createServer(app);
 server.listen(port);

@@ -153,7 +153,12 @@ app.post('/inventory', function(req, res) {
                 }
             }
 
-            t.blueprint = blueprints[t.blueprint];
+            var blueprint = blueprints[t.blueprint];
+            if (blueprint === undefined || blueprint.volume === undefined) {
+                throw new Error("invalid blueprint: " + t.blueprint);
+            } else {
+                t.blueprint = blueprint;
+            }
 
             if (t.container_action !== undefined) {
                 containers.push(t);
@@ -180,6 +185,8 @@ app.post('/inventory', function(req, res) {
         executeTransfers(transactions);
 
         res.sendStatus(204);
+    }).fail(function(e) {
+        res.status(500).send(e.toString());
     }).done();
 });
 
@@ -280,7 +287,6 @@ app.post('/inventory/:uuid/:slice', function(req, res) {
         // and return the correct errors for the response
         if (blueprint === undefined ||
             blueprint.volume === undefined) {
-            res.status(400).send("invalid blueprint: " + type);
         }
 
         executeTransfers([{

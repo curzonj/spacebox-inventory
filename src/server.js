@@ -17,6 +17,9 @@ app.use(bodyParser.urlencoded({
     extended: false
 }));
 
+// TODO inventory will need to keep track of
+// ships and any modules or customization they
+// have. It'll need a seperate root hash.
 var inventories = {};
 var slice_permissions = {};
 
@@ -29,14 +32,8 @@ function authorize(req, restricted) {
 
     var parts = auth_header.split(' ');
 
-    // TODO make a way for internal apis to authorize
-    // as a specific account without having to get a
-    // different bearer token for each one. Perhaps
-    // auth will return a certain account if the authorized
-    // token has metadata appended to the end of it
-    // or is fernet encoded.
     if (parts[0] != "Bearer") {
-        console.log("invalid auth type: "+parts[0]);
+        console.log("invalid auth type: " + parts[0]);
         throw new Error("not authorized");
     }
 
@@ -54,7 +51,7 @@ function authorize(req, restricted) {
     }).then(function(body) {
         return JSON.parse(body.toString());
     }).fail(function(e) {
-        throw new Error("not authorized: "+e.toString());
+        throw new Error("not authorized: " + e.toString());
     });
 }
 
@@ -99,7 +96,7 @@ app.post('/containers/:uuid', function(req, res) {
                 updateContainer(uuid, auth.account, blueprint);
                 res.sendStatus(204);
             } else {
-                console.log(auth.account, "not authorized to update",uuid);
+                console.log(auth.account, "not authorized to update", uuid);
                 res.sendStatus(401);
             }
         } else {
@@ -230,38 +227,54 @@ app.post('/ships', function(req, res) {
 
 // TODO support a schema validation
 app.post('/inventory', function(req, res) {
-    var transactions = [],
-        containers = [];
-
     Q.spread([getBlueprints(), authorize(req)], function(blueprints, auth) {
-        req.body.forEach(function(t) {
-            if (t.ship_uuid !== undefined) {
-                // TODO lookup the blueprint we have stored
+        var transactions = [],
+            containers = [],
+            new_containers = [],
+            old_containers = [];
 
-                if (t.quantity != -1 && t.quantity != 1) {
-                    throw new Error("quantity must be 1 or -1 for unpacked ships");
-                }
-            }
+        req.body.forEach(function(t) {
 
             var blueprint = blueprints[t.blueprint];
-            if (blueprint === undefined || blueprint.volume === undefined) {
-                throw new Error("invalid blueprint: " + t.blueprint);
-            } else {
-                t.blueprint = blueprint;
-            }
+            t.blueprint = blueprint;
 
-            // TODO each one of these has to be authorized
+            // TODO this method of authorization doesn't allow
+            // cross account trades
             if (t.container_action !== undefined) {
-                if (t.container_action != "create" &&
-                    !containerAuthorized(t.uuid, auth.account)) {
-                    return res.sendStatus(401);
+                if (auth.priviliged === true) {
+                    // Because spodb does it when it deploys things from inventory
+                    return res.status(401).send("not authorized to create containers");
+                }
+
+                if (t.container_action == "create") {
+                    new_containers.push(t.uuid);
+                } else {
+                    old_containers.push(t.uuid);
+
+                    if (!containerAuthorized(t.uuid, auth.account)) {
+                        return res.status(401).send("not authorized to delete " + t.uuid);
+                    }
                 }
 
                 containers.push(t);
             } else {
-                if (!containerAuthorized(t.inventory, auth.account)) {
-                    console.log(auth.account, "cannot access", t.inventory);
-                    return res.sendStatus(401);
+                if (old_containers.indexOf(t.inventory) > 0) {
+                    return res.status(400).send(t.inventory + " is being deleted");
+                } else if (new_containers.indexOf(t.inventory) == -1 &&
+                    !containerAuthorized(t.inventory, auth.account)) {
+                    return res.status(401).send(auth.account + " cannot access " + t.inventory);
+                }
+
+                if (t.blueprint === undefined || (t.blueprint.volume === undefined)) {
+                    return res.status(400).send("invalid blueprint: " + t.blueprint);
+                }
+
+                if (t.ship_uuid !== undefined) {
+                    // TODO lookup the blueprint we have stored
+
+                    if (t.quantity != -1 && t.quantity != 1) {
+                        return res.status(400).send("quantity must be 1 or -1 for unpacked ships");
+                    }
                 }
 
                 transactions.push(t);
@@ -269,6 +282,25 @@ app.post('/inventory', function(req, res) {
         });
 
         // validate that the transaction is balanced unless the user is special
+        if (auth.privileged !== true) {
+            var counters = {};
+
+            transactions.forEach(function(t) {
+                var type = t.ship_uuid || t.blueprint.uuid;
+
+                if (counters[type] === undefined) {
+                    counters[type] = 0;
+                }
+
+                counters[type] += t.quantity;
+            });
+
+            for (var key in counters) {
+                if (counters[key] === 0) {
+                    return res.status(400).send(key + " is not balanced");
+                }
+            }
+        }
 
         // TODO this should all be in postgres and a database transaction
         containers.forEach(function(c) {
@@ -285,7 +317,7 @@ app.post('/inventory', function(req, res) {
 
         executeTransfers(transactions);
 
-        res.sendStatus(204);
+        return res.sendStatus(204);
     }).fail(function(e) {
         res.status(500).send(e.toString());
     }).done();

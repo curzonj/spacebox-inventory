@@ -10,7 +10,6 @@ var qhttp = require("q-io/http");
 
 var app = express();
 var port = process.env.PORT || 5000;
-var internal = process.env.SHARED_SECRET;
 
 app.use(logger('dev'));
 app.use(bodyParser.json());
@@ -21,7 +20,7 @@ app.use(bodyParser.urlencoded({
 var inventories = {};
 var slice_permissions = {};
 
-function authorize(req) {
+function authorize(req, restricted) {
     var auth_header = req.get('Authorization');
     if (auth_header === undefined) {
         throw new Error("not authorized");
@@ -29,6 +28,12 @@ function authorize(req) {
 
     var parts = auth_header.split(' ');
 
+    // TODO make a way for internal apis to authorize
+    // as a specific account without having to get a
+    // different bearer token for each one. Perhaps
+    // auth will return a certain account if the authorized
+    // token has metadata appended to the end of it
+    // or is fernet encoded.
     if (parts[0] != "Bearer") {
         throw new Error("not authorized");
     }
@@ -36,16 +41,22 @@ function authorize(req) {
     // This will fail if it's not authorized
     return qhttp.request({
         method: "POST",
-        url: process.env.AUTH_URL + '/authorized',
-        headers: { "Content-Type": "application/json" },
-        body: [ JSON.stringify({
-            action: req.param('action'),
-            token: parts[1]
-        }) ]
+        url: process.env.AUTH_URL + '/token',
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: [JSON.stringify({
+            token: parts[1],
+            restricted: (restricted === true)
+        })]
     }).then(function(res) {
         if (res.status != 200) {
             throw new Error("not authorized");
+        } else {
+            return res.body.read();
         }
+    }).then(function(body) {
+        return JSON.parse(body.toString());
     });
 }
 
@@ -57,36 +68,56 @@ function getBlueprints() {
 
 // NOTE /containers endpoints are restricted to spodb and production api
 app.delete('/containers/:uuid', function(req, res) {
-    var uuid = req.param('uuid');
+    authorize(req, true).then(function(auth) {
+        var uuid = req.param('uuid');
 
-    if (inventories[uuid] === undefined) {
-        res.sendStatus(404);
-        return;
-    }
+        if (inventories[uuid] === undefined) {
+            res.sendStatus(404);
+            return;
+        }
 
-    destroyContainer(uuid);
-
-    res.sendStatus(204);
+        if (containerAuthorized(uuid, auth.account)) {
+            destroyContainer(uuid);
+            res.sendStatus(204);
+        } else {
+            res.sendStatus(401);
+        }
+    }).fail(function(e) {
+        res.status(500).send(e.toString());
+    }).done();
 });
 
 app.post('/containers/:uuid', function(req, res) {
     var uuid = req.param('uuid'),
         blueprintID = req.param('blueprint');
 
-    getBlueprints().then(function(blueprints) {
+    Q.spread([getBlueprints(), authorize(req, true)], function(blueprints, auth) {
         var blueprint = blueprints[blueprintID];
 
         if (blueprint === undefined) {
             res.status(400).send("Invalid blueprint");
         } else if (inventories[uuid] !== undefined) {
-            updateContainer(uuid, blueprint);
-            res.sendStatus(204);
+            if (containerAuthorized(uuid, auth.account)) {
+                updateContainer(uuid, auth.account, blueprint);
+                res.sendStatus(204);
+            } else {
+                console.log(auth.account, "not authorized to update",uuid);
+                res.sendStatus(401);
+            }
         } else {
-            buildContainer(uuid, blueprint);
+            buildContainer(uuid, auth.account, blueprint);
             res.sendStatus(204);
         }
+    }).fail(function(e) {
+        res.status(500).send(e.toString());
     }).done();
 });
+
+function containerAuthorized(uuid, account) {
+    var i = inventories[uuid];
+
+    return (i !== undefined && i.account == account);
+}
 
 function updateContainer(uuid, newBlueprint) {
     var i = inventories[uuid],
@@ -97,11 +128,12 @@ function updateContainer(uuid, newBlueprint) {
     i.capacity.hanger = b.hanger_capacity;
 }
 
-function buildContainer(uuid, blueprint) {
+function buildContainer(uuid, account, blueprint) {
     var b = blueprint;
 
     inventories[uuid] = {
         blueprint: b.uuid,
+        account: account,
         capacity: {
             cargo: b.inventory_capacity || 0,
             hanger: b.hanger_capacity || 0,
@@ -124,17 +156,39 @@ function destroyContainer(uuid) {
 }
 
 app.get('/inventory', function(req, res) {
-    authorize(req).then(function() {
-        res.send(inventories);
+    authorize(req).then(function(auth) {
+        var my_inventories = {};
+
+        for (var key in inventories) {
+            var i = inventories[key];
+            if (i.account == auth.account) {
+                my_inventories[key] = i;
+            }
+        }
+
+        res.send(my_inventories);
     }).fail(function(e) {
         res.status(500).send(e.toString());
-    });
+        throw e;
+    }).done();
 });
 
 app.get('/inventory/:uuid', function(req, res) {
-    res.send(inventories[req.param('uuid')]);
+    var uuid = req.param('uuid');
+
+    authorize(req).then(function(auth) {
+        if (containerAuthorized(uuid, auth.account)) {
+            res.send(inventories[uuid]);
+        } else {
+            res.sendStatus(401);
+        }
+    }).fail(function(e) {
+        res.status(500).send(e.toString());
+        throw e;
+    }).done();
 });
 
+// this unpacks a ship from inventory and makes it unique
 app.post('/ships', function(req, res) {
     var uuid = uuidGen.v1(),
         inventoryID = req.param('inventory'),
@@ -142,34 +196,34 @@ app.post('/ships', function(req, res) {
         blueprintID = req.param('blueprint'),
         inventory = inventories[inventoryID];
 
-    if (inventory === undefined || inventory.hanger[sliceID] === undefined) {
-        res.status(400).send("no such inventory");
-    } else {
-        var slice = inventory.hanger[sliceID];
-
-        if (slice[blueprintID] === undefined || slice[blueprintID] === 0) {
-            throw new Error("no ships present: " + blueprintID);
+    authorize(req).then(function(auth) {
+        if (!containerAuthorized(inventoryID, auth.account)) {
+            return res.sendStatus(401);
         }
 
-        getBlueprints().then(function(blueprints) {
-            var blueprint = blueprints[blueprintID];
+        if (inventory === undefined || inventory.hanger[sliceID] === undefined) {
+            res.status(400).send("no such inventory");
+        } else {
+            var slice = inventory.hanger[sliceID];
 
-            if (blueprint === undefined) {
-                res.status(400).send("Invalid blueprint");
-            } else {
-                slice[blueprintID] -= 1;
-
-                slice.unpacked.push({
-                    uuid: uuid,
-                    blueprint: blueprintID
-                });
-
-                buildContainer(uuid, blueprintID);
-
-                res.sendStatus(201);
+            if (slice[blueprintID] === undefined || slice[blueprintID] === 0) {
+                throw new Error("no ships present: " + blueprintID);
             }
-        }).done();
-    }
+
+            slice[blueprintID] -= 1;
+
+            slice.unpacked.push({
+                uuid: uuid,
+                blueprint: blueprintID
+            });
+
+            buildContainer(uuid, blueprintID);
+
+            res.sendStatus(201);
+        }
+    }).fail(function(e) {
+        res.status(500).send(e.toString());
+    }).done();
 });
 
 // TODO support a schema validation
@@ -177,7 +231,7 @@ app.post('/inventory', function(req, res) {
     var transactions = [],
         containers = [];
 
-    getBlueprints().then(function(blueprints) {
+    Q.spread([getBlueprints(), authorize(req)], function(blueprints, auth) {
         req.body.forEach(function(t) {
             if (t.ship_uuid !== undefined) {
                 // TODO lookup the blueprint we have stored
@@ -194,9 +248,20 @@ app.post('/inventory', function(req, res) {
                 t.blueprint = blueprint;
             }
 
+            // TODO each one of these has to be authorized
             if (t.container_action !== undefined) {
+                if (t.container_action != "create" &&
+                    !containerAuthorized(t.uuid, auth.account)) {
+                    return res.sendStatus(401);
+                }
+
                 containers.push(t);
             } else {
+                if (!containerAuthorized(t.inventory, auth.account)) {
+                    console.log(auth.account, "cannot access", t.inventory);
+                    return res.sendStatus(401);
+                }
+
                 transactions.push(t);
             }
         });
@@ -206,8 +271,8 @@ app.post('/inventory', function(req, res) {
         // TODO this should all be in postgres and a database transaction
         containers.forEach(function(c) {
             if (c.container_action == "create") {
-                buildContainer(c.uuid, c.blueprint);
-            } else {
+                buildContainer(c.uuid, auth.account, c.blueprint);
+            } else { // destroy ?
                 if (inventories[c.uuid] === undefined) {
                     throw new Error("no such inventory");
                 }
@@ -301,41 +366,6 @@ function executeTransfers(transfers) {
         inventory.usage[slot] = final_volume;
     });
 }
-
-/*
-// This is totally depricated and doesn't support unpacked ships
-app.post('/inventory/:uuid/:slice', function(req, res) {
-    var uuid = req.param('uuid');
-    var sliceID = req.param('slice');
-    var type = req.param('type');
-
-    if (inventories[uuid] === undefined) {
-        res.sendStatus(404);
-        return;
-    }
-
-    getBlueprints().then(function(blueprints) {
-        var blueprint = blueprints[type];
-
-        // TODO executeTransfers should be able to do this
-        // and return the correct errors for the response
-        if (blueprint === undefined ||
-            blueprint.volume === undefined) {
-        }
-
-        executeTransfers([{
-            inventory: uuid,
-            slice: sliceID,
-            quantity: parseInt(req.param("quantity")),
-            blueprint: blueprint
-        }]);
-
-        res.send(inventories[uuid]);
-    }).fail(function(e) {
-        res.status(500).send(e.toString());
-    }).done();
-});
-*/
 
 var server = http.createServer(app);
 server.listen(port);

@@ -23,6 +23,7 @@ var slice_permissions = {};
 function authorize(req, restricted) {
     var auth_header = req.get('Authorization');
     if (auth_header === undefined) {
+        console.log("authorization header missing");
         throw new Error("not authorized");
     }
 
@@ -35,11 +36,12 @@ function authorize(req, restricted) {
     // token has metadata appended to the end of it
     // or is fernet encoded.
     if (parts[0] != "Bearer") {
+        console.log("invalid auth type: "+parts[0]);
         throw new Error("not authorized");
     }
 
     // This will fail if it's not authorized
-    return qhttp.request({
+    return qhttp.read({
         method: "POST",
         url: process.env.AUTH_URL + '/token',
         headers: {
@@ -49,14 +51,10 @@ function authorize(req, restricted) {
             token: parts[1],
             restricted: (restricted === true)
         })]
-    }).then(function(res) {
-        if (res.status != 200) {
-            throw new Error("not authorized");
-        } else {
-            return res.body.read();
-        }
     }).then(function(body) {
         return JSON.parse(body.toString());
+    }).fail(function(e) {
+        throw new Error("not authorized: "+e.toString());
     });
 }
 
@@ -157,16 +155,20 @@ function destroyContainer(uuid) {
 
 app.get('/inventory', function(req, res) {
     authorize(req).then(function(auth) {
-        var my_inventories = {};
+        if (auth.privileged && req.param('all') == 'true') {
+            res.send(inventories);
+        } else {
+            var my_inventories = {};
 
-        for (var key in inventories) {
-            var i = inventories[key];
-            if (i.account == auth.account) {
-                my_inventories[key] = i;
+            for (var key in inventories) {
+                var i = inventories[key];
+                if (i.account == auth.account) {
+                    my_inventories[key] = i;
+                }
             }
-        }
 
-        res.send(my_inventories);
+            res.send(my_inventories);
+        }
     }).fail(function(e) {
         res.status(500).send(e.toString());
         throw e;

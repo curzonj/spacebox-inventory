@@ -93,7 +93,7 @@ app.post('/containers/:uuid', function(req, res) {
             res.status(400).send("Invalid blueprint");
         } else if (inventories[uuid] !== undefined) {
             if (containerAuthorized(uuid, auth.account)) {
-                updateContainer(uuid, auth.account, blueprint);
+                updateContainer(uuid, blueprint);
                 res.sendStatus(204);
             } else {
                 console.log(auth.account, "not authorized to update", uuid);
@@ -228,76 +228,91 @@ app.post('/ships', function(req, res) {
 // TODO support a schema validation
 app.post('/inventory', function(req, res) {
     Q.spread([getBlueprints(), authorize(req)], function(blueprints, auth) {
-        var transactions = [],
+        var dataset = req.body,
+            transactions = [],
             containers = [],
             new_containers = [],
             old_containers = [];
 
-        req.body.forEach(function(t) {
+        dataset.forEach(function(t) {
+            t.blueprint = blueprints[t.blueprint];
+        });
 
-            var blueprint = blueprints[t.blueprint];
-            t.blueprint = blueprint;
+        // TODO this method of authorization doesn't allow
+        // cross account trades
 
-            // TODO this method of authorization doesn't allow
-            // cross account trades
-            if (t.container_action !== undefined) {
-                if (auth.priviliged === true) {
-                    // Because spodb does it when it deploys things from inventory
-                    return res.status(401).send("not authorized to create containers");
-                }
+        dataset.forEach(function(t) {
+            if (t.container_action === undefined) return;
 
-                if (t.container_action == "create") {
-                    new_containers.push(t.uuid);
-                } else {
-                    old_containers.push(t.uuid);
+            //This is currently unpriviliged because spodb isn't ready
+            //yet. But that's ok because the balanced transactions below
+            //make sure that it must already exist to be deployed.
+            /*if (auth.priviliged === true) {
+                // Because spodb does it when it deploys things from inventory
+                throw new Error("not authorized to create containers");
+            }*/
 
-                    if (!containerAuthorized(t.uuid, auth.account)) {
-                        return res.status(401).send("not authorized to delete " + t.uuid);
-                    }
-                }
-
-                containers.push(t);
+            if (t.container_action == "create") {
+                new_containers.push(t.uuid);
             } else {
-                if (old_containers.indexOf(t.inventory) > 0) {
-                    return res.status(400).send(t.inventory + " is being deleted");
-                } else if (new_containers.indexOf(t.inventory) == -1 &&
-                    !containerAuthorized(t.inventory, auth.account)) {
-                    return res.status(401).send(auth.account + " cannot access " + t.inventory);
+                old_containers.push(t.uuid);
+
+                if (!containerAuthorized(t.uuid, auth.account)) {
+                    throw new Error("not authorized to delete " + t.uuid);
                 }
-
-                if (t.blueprint === undefined || (t.blueprint.volume === undefined)) {
-                    return res.status(400).send("invalid blueprint: " + t.blueprint);
-                }
-
-                if (t.ship_uuid !== undefined) {
-                    // TODO lookup the blueprint we have stored
-
-                    if (t.quantity != -1 && t.quantity != 1) {
-                        return res.status(400).send("quantity must be 1 or -1 for unpacked ships");
-                    }
-                }
-
-                transactions.push(t);
             }
+
+            containers.push(t);
+        });
+
+        dataset.forEach(function(t) {
+            if (t.container_action !== undefined) return;
+
+            if (old_containers.indexOf(t.inventory) > 0) {
+                throw new Error(t.inventory + " is being deleted");
+            } else if (new_containers.indexOf(t.inventory) == -1 &&
+                !containerAuthorized(t.inventory, auth.account)) {
+                throw new Error(auth.account + " cannot access " + t.inventory);
+            }
+
+            if (t.blueprint === undefined || (t.blueprint.volume === undefined)) {
+                throw new Error("invalid blueprint: " + t.blueprint);
+            }
+
+            if (t.ship_uuid !== undefined) {
+                // TODO lookup the blueprint we have stored
+
+                if (t.quantity != -1 && t.quantity != 1) {
+                    throw new Error("quantity must be 1 or -1 for unpacked ships");
+                }
+            }
+
+            transactions.push(t);
         });
 
         // validate that the transaction is balanced unless the user is special
         if (auth.privileged !== true) {
             var counters = {};
 
-            transactions.forEach(function(t) {
-                var type = t.ship_uuid || t.blueprint.uuid;
-
+            var increment = function(type, q) {
                 if (counters[type] === undefined) {
                     counters[type] = 0;
                 }
 
-                counters[type] += t.quantity;
+                counters[type] += q;
+            };
+
+            containers.forEach(function(c) {
+                increment(c.blueprint.uuid, (c.container_action == 'create' ? 1 : -1));
+            });
+
+            transactions.forEach(function(t) {
+                increment(t.ship_uuid || t.blueprint.uuid, t.quantity);
             });
 
             for (var key in counters) {
-                if (counters[key] === 0) {
-                    return res.status(400).send(key + " is not balanced");
+                if (counters[key] !== 0) {
+                    throw new Error(key + " is not balanced");
                 }
             }
         }
@@ -391,7 +406,7 @@ function executeTransfers(transfers) {
             var result = slice[type] + transfer.quantity;
 
             if (result < 0) {
-                throw new Error("Not enough cargo present");
+                throw new Error("Not enough cargo present: "+type);
             }
 
             slice[type] = result;

@@ -7,6 +7,7 @@ var bodyParser = require('body-parser');
 var uuidGen = require('node-uuid');
 var Q = require('q');
 var qhttp = require("q-io/http");
+var C = require('spacebox-common');
 
 var app = express();
 var port = process.env.PORT || 5000;
@@ -23,38 +24,6 @@ app.use(bodyParser.urlencoded({
 var inventories = {};
 var slice_permissions = {};
 
-function authorize(req, restricted) {
-    var auth_header = req.get('Authorization');
-    if (auth_header === undefined) {
-        console.log("authorization header missing");
-        throw new Error("not authorized");
-    }
-
-    var parts = auth_header.split(' ');
-
-    if (parts[0] != "Bearer") {
-        console.log("invalid auth type: " + parts[0]);
-        throw new Error("not authorized");
-    }
-
-    // This will fail if it's not authorized
-    return qhttp.read({
-        method: "POST",
-        url: process.env.AUTH_URL + '/token',
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: [JSON.stringify({
-            token: parts[1],
-            restricted: (restricted === true)
-        })]
-    }).then(function(body) {
-        return JSON.parse(body.toString());
-    }).fail(function(e) {
-        throw new Error("not authorized: " + e.toString());
-    });
-}
-
 function getBlueprints() {
     return qhttp.read(process.env.TECHDB_URL + '/blueprints').then(function(b) {
         return JSON.parse(b.toString());
@@ -63,7 +32,7 @@ function getBlueprints() {
 
 // NOTE /containers endpoints are restricted to spodb and production api
 app.delete('/containers/:uuid', function(req, res) {
-    authorize(req, true).then(function(auth) {
+    C.authorize_req(req, true).then(function(auth) {
         var uuid = req.param('uuid');
 
         if (inventories[uuid] === undefined) {
@@ -86,7 +55,7 @@ app.post('/containers/:uuid', function(req, res) {
     var uuid = req.param('uuid'),
         blueprintID = req.param('blueprint');
 
-    Q.spread([getBlueprints(), authorize(req, true)], function(blueprints, auth) {
+    Q.spread([getBlueprints(), C.authorize_req(req, true)], function(blueprints, auth) {
         var blueprint = blueprints[blueprintID];
 
         if (blueprint === undefined) {
@@ -151,7 +120,7 @@ function destroyContainer(uuid) {
 }
 
 app.get('/inventory', function(req, res) {
-    authorize(req).then(function(auth) {
+    C.authorize_req(req).then(function(auth) {
         if (auth.privileged && req.param('all') == 'true') {
             res.send(inventories);
         } else {
@@ -175,7 +144,7 @@ app.get('/inventory', function(req, res) {
 app.get('/inventory/:uuid', function(req, res) {
     var uuid = req.param('uuid');
 
-    authorize(req).then(function(auth) {
+    C.authorize_req(req).then(function(auth) {
         if (containerAuthorized(uuid, auth.account)) {
             res.send(inventories[uuid]);
         } else {
@@ -195,7 +164,7 @@ app.post('/ships', function(req, res) {
         blueprintID = req.param('blueprint'),
         inventory = inventories[inventoryID];
 
-    authorize(req).then(function(auth) {
+    C.authorize_req(req).then(function(auth) {
         if (!containerAuthorized(inventoryID, auth.account)) {
             return res.sendStatus(401);
         }
@@ -227,7 +196,7 @@ app.post('/ships', function(req, res) {
 
 // TODO support a schema validation
 app.post('/inventory', function(req, res) {
-    Q.spread([getBlueprints(), authorize(req)], function(blueprints, auth) {
+    Q.spread([getBlueprints(), C.authorize_req(req)], function(blueprints, auth) {
         var dataset = req.body,
             transactions = [],
             containers = [],

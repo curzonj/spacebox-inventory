@@ -382,6 +382,7 @@ app.post('/inventory', function(req, res) {
 
         return res.sendStatus(204);
     }).fail(function(e) {
+        console.log(e); // TODO include request-id
         res.status(500).send(e.toString());
     }).done();
 });

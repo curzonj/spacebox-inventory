@@ -384,19 +384,16 @@ app.post('/inventory', function(req, res) {
             }
         }
 
-        // TODO this should all be in postgres and a database transaction
-        var containerP = containers.map(function(c) {
-            if (c.container_action == "create") {
-                return buildContainer(c.uuid, auth.account, c.blueprint);
-            } else { // destroy ?
-                return dao.destroy(c.uuid);
-            }
-        });
-
-        console.log(containerP);
-        
-        return Q.spread(containerP).
-        then(function() {
+        return Q.fcall(function() {
+            // TODO this should all be in a database transaction
+            return containers.map(function(c) {
+                if (c.container_action == "create") {
+                    return buildContainer(c.uuid, auth.account, c.blueprint);
+                } else { // destroy ?
+                    return dao.destroy(c.uuid);
+                }
+            });
+        }).all(function() {
             return executeTransfers(transactions);
         }).then(function() {
             res.sendStatus(204);

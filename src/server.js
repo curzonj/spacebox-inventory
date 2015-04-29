@@ -47,6 +47,10 @@ var dao = {
                 return data[0];
             });
     },
+    update: function(uuid, doc) {
+        return db.
+            query("update inventories set doc = $2 where id =$1", [ uuid, doc ]);
+    },
     insert: function(uuid, doc) {
         return db.
             query("insert into inventories (id, account, doc) values ($1, $2, $3)",
@@ -285,10 +289,10 @@ app.post('/ships', function(req, res) {
 app.post('/inventory', function(req, res) {
     Q.spread([C.getBlueprints(), C.authorize_req(req)], function(blueprints, auth) {
         var dataset = req.body,
-        transactions = [],
-        containers = [],
-        new_containers = [],
-        old_containers = [];
+            transactions = [],
+            containers = [],
+            new_containers = [],
+            old_containers = [];
 
         dataset.forEach(function(t) {
             t.blueprint = blueprints[t.blueprint];
@@ -321,8 +325,10 @@ app.post('/inventory', function(req, res) {
             containers.push(t);
         });
 
+        console.log(dataset, new_containers, old_containers, containers);
+
         return Q.fcall(function() {
-            return dataset.map(function(t) {
+            return Q.all(dataset.map(function(t) {
                 if (t.container_action !== undefined) return;
 
                 if (old_containers.indexOf(t.inventory) > 0) {
@@ -334,8 +340,8 @@ app.post('/inventory', function(req, res) {
                         }
                     });
                 }
-            });
-        }).all(function() {
+            }));
+        }).then(function() {
             dataset.forEach(function(t) {
                 if (t.ship_uuid !== undefined) {
                     var shipRecord = ships[t.ship_uuid];
@@ -360,7 +366,9 @@ app.post('/inventory', function(req, res) {
                     throw new Error("invalid blueprint: " + t.blueprint);
                 }
 
-                transactions.push(t);
+                if (t.container_action === undefined) {
+                    transactions.push(t);
+                }
             });
 
             // validate that the transaction is balanced unless the user is special
@@ -391,14 +399,15 @@ app.post('/inventory', function(req, res) {
             }
         }).then(function() {
             // TODO this should all be in a database transaction
-            return containers.map(function(c) {
+            return Q.all(containers.map(function(c) {
                 if (c.container_action == "create") {
                     return buildContainer(c.uuid, auth.account, c.blueprint);
                 } else { // destroy ?
                     return dao.destroy(c.uuid);
                 }
-            });
-        }).all(function() {
+            }));
+        }).then(function() {
+            console.log('executing', transactions);
             return executeTransfers(transactions);
         }).then(function() {
             res.sendStatus(204);
@@ -412,7 +421,7 @@ app.post('/inventory', function(req, res) {
 
 // TODO if there is not enough room, the transaction will fail unbalanced
 function executeTransfers(transfers) {
-    return Q.spread(transfers.map(function(transfer) {
+    return Q.all(transfers.map(function(transfer) {
         var example = {
             inventory: 'uuid',
             slice: 'uuid',
@@ -420,14 +429,22 @@ function executeTransfers(transfers) {
             blueprint: {},
             ship_uuid: 'uuid' // only for unpacked ships and quantity must == -1 or 1
         };
+        var example_container = {
+            uuid: 'uuid',
+            container_action: 'create|destroy',
+            blueprint: 'uuid'
+        };
         console.log(transfer);
 
-        return dao.get(transfer.inventory).then(function(inventory) {
+        return dao.get(transfer.inventory).then(function(data) {
             var slot;
-            var quantity = transfer.quantity;
-            var sliceID = transfer.slice;
+            var inventory = data.doc,
+                quantity = transfer.quantity,
+                sliceID = transfer.slice;
 
             var type = transfer.blueprint.uuid;
+
+            console.log('inventory', inventory);
 
             if (inventory === undefined) {
                 throw new Error("no such inventory: " + transfer.inventory);
@@ -489,6 +506,8 @@ function executeTransfers(transfers) {
             }
 
             inventory.usage[slot] = final_volume;
+
+            return dao.update(transfer.inventory, inventory);
         });
     }));
 }

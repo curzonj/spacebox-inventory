@@ -134,6 +134,7 @@ function buildContainer(uuid, account, blueprint) {
     var b = blueprint;
 
     return dao.insert(uuid, {
+        uuid: uuid,
         blueprint: b.uuid,
         account: account,
         capacity: {
@@ -280,6 +281,7 @@ app.post('/ships', function(req, res) {
             });
         }
     }).fail(function(e) {
+        console.log(e);
         console.log(e.stack);
         res.status(500).send(e.toString());
     }).done();
@@ -324,8 +326,6 @@ app.post('/inventory', function(req, res) {
 
             containers.push(t);
         });
-
-        console.log(dataset, new_containers, old_containers, containers);
 
         return Q.fcall(function() {
             return Q.all(dataset.map(function(t) {
@@ -407,7 +407,6 @@ app.post('/inventory', function(req, res) {
                 }
             }));
         }).then(function() {
-            console.log('executing', transactions);
             return executeTransfers(transactions);
         }).then(function() {
             res.sendStatus(204);
@@ -434,7 +433,6 @@ function executeTransfers(transfers) {
             container_action: 'create|destroy',
             blueprint: 'uuid'
         };
-        console.log(transfer);
 
         return dao.get(transfer.inventory).then(function(data) {
             var slot;
@@ -443,8 +441,6 @@ function executeTransfers(transfers) {
                 sliceID = transfer.slice;
 
             var type = transfer.blueprint.uuid;
-
-            console.log('inventory', inventory);
 
             if (inventory === undefined) {
                 throw new Error("no such inventory: " + transfer.inventory);

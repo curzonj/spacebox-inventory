@@ -321,70 +321,75 @@ app.post('/inventory', function(req, res) {
             containers.push(t);
         });
 
-        dataset.forEach(function(t) {
-            if (t.container_action !== undefined) return;
-
-            if (old_containers.indexOf(t.inventory) > 0) {
-                throw new Error(t.inventory + " is being deleted");
-            } else if (new_containers.indexOf(t.inventory) == -1 &&
-                       !containerAuthorized(t.inventory, auth.account)) {
-                throw new Error(auth.account + " cannot access " + t.inventory);
-            }
-
-            if (t.ship_uuid !== undefined) {
-                var shipRecord = ships[t.ship_uuid];
-                if (shipRecord === undefined) {
-                    throw new Error("no such ship: "+t.ship_uuid);
-                } else if(shipRecord.in_space === true) {
-                    throw new Error("that ship is in space and cannot be moved");
-                } else {
-                    t.blueprint = blueprints[shipRecord.blueprint];
-                }
-
-                if (t.quantity === -1) {
-                    if (shipRecord.location !== t.inventory || shipRecord.slice !== t.slice) {
-                        throw new Error("the ship is not there");
-                    }
-                } else if (t.quantity != 1) {
-                    throw new Error("quantity must be 1 or -1 for unpacked ships");
-                }
-            }
-
-            if (t.blueprint === undefined || (t.blueprint.volume === undefined)) {
-                throw new Error("invalid blueprint: " + t.blueprint);
-            }
-
-            transactions.push(t);
-        });
-
-        // validate that the transaction is balanced unless the user is special
-        if (auth.privileged !== true) {
-            var counters = {};
-
-            var increment = function(type, q) {
-                if (counters[type] === undefined) {
-                    counters[type] = 0;
-                }
-
-                counters[type] += q;
-            };
-
-            containers.forEach(function(c) {
-                increment(c.blueprint.uuid, (c.container_action == 'create' ? 1 : -1));
-            });
-
-            transactions.forEach(function(t) {
-                increment(t.ship_uuid || t.blueprint.uuid, t.quantity);
-            });
-
-            for (var key in counters) {
-                if (counters[key] !== 0) {
-                    throw new Error(key + " is not balanced");
-                }
-            }
-        }
-
         return Q.fcall(function() {
+            return dataset.map(function(t) {
+                if (t.container_action !== undefined) return;
+
+                if (old_containers.indexOf(t.inventory) > 0) {
+                    throw new Error(t.inventory + " is being deleted");
+                } else if (new_containers.indexOf(t.inventory) == -1) {
+                    return dao.get(t.inventory).then(function(container) {
+                        if (!containerAuthorized(container, auth.account)) {
+                            throw new Error(auth.account + " cannot access " + t.inventory);
+                        }
+                    });
+                }
+            });
+        }).all(function() {
+            dataset.forEach(function(t) {
+                if (t.ship_uuid !== undefined) {
+                    var shipRecord = ships[t.ship_uuid];
+                    if (shipRecord === undefined) {
+                        throw new Error("no such ship: "+t.ship_uuid);
+                    } else if(shipRecord.in_space === true) {
+                        throw new Error("that ship is in space and cannot be moved");
+                    } else {
+                        t.blueprint = blueprints[shipRecord.blueprint];
+                    }
+
+                    if (t.quantity === -1) {
+                        if (shipRecord.location !== t.inventory || shipRecord.slice !== t.slice) {
+                            throw new Error("the ship is not there");
+                        }
+                    } else if (t.quantity != 1) {
+                        throw new Error("quantity must be 1 or -1 for unpacked ships");
+                    }
+                }
+
+                if (t.blueprint === undefined || (t.blueprint.volume === undefined)) {
+                    throw new Error("invalid blueprint: " + t.blueprint);
+                }
+
+                transactions.push(t);
+            });
+
+            // validate that the transaction is balanced unless the user is special
+            if (auth.privileged !== true) {
+                var counters = {};
+
+                var increment = function(type, q) {
+                    if (counters[type] === undefined) {
+                        counters[type] = 0;
+                    }
+
+                    counters[type] += q;
+                };
+
+                containers.forEach(function(c) {
+                    increment(c.blueprint.uuid, (c.container_action == 'create' ? 1 : -1));
+                });
+
+                transactions.forEach(function(t) {
+                    increment(t.ship_uuid || t.blueprint.uuid, t.quantity);
+                });
+
+                for (var key in counters) {
+                    if (counters[key] !== 0) {
+                        throw new Error(key + " is not balanced");
+                    }
+                }
+            }
+        }).then(function() {
             // TODO this should all be in a database transaction
             return containers.map(function(c) {
                 if (c.container_action == "create") {

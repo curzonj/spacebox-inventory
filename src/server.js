@@ -9,8 +9,15 @@ var Q = require('q');
 var qhttp = require("q-io/http");
 var C = require('spacebox-common');
 
+var pgpLib = require('pg-promise');
+var pgp = pgpLib(/*options*/);
+var database_url = process.env.DATABASE_URL || process.env.INVENTORY_DATABASE_URL;
+var db = pgp(database_url);
+
 var app = express();
 var port = process.env.PORT || 5000;
+
+Q.longStackSupport = true;
 
 app.use(logger('dev'));
 app.use(bodyParser.json());
@@ -25,29 +32,54 @@ var inventories = {};
 var slice_permissions = {};
 var ships = {};
 
-function getBlueprints() {
-    return qhttp.read(process.env.TECHDB_URL + '/blueprints').then(function(b) {
-        return JSON.parse(b.toString());
-    });
-}
+var dao = {
+    all: function(account) {
+        if (account === undefined) {
+            return db.query("select * from inventories");
+        } else {
+            return db.query("select * from inventories where account=$1", [ account ]);
+        }
+    },
+    get: function(uuid) {
+        return db.
+            query("select * from inventories where id=$1", [ uuid ]).
+            then(function(data) {
+                return data[0];
+            });
+    },
+    insert: function(uuid, doc) {
+        return db.
+            query("insert into inventories (id, account, doc) values ($1, $2, $3)",
+                  [ uuid, doc.account, doc ]);
+    },
+    destroy: function (uuid) {
+        // TODO this should also require that the container is empty
+        return db.query("delete from inventories where id = $1", [ uuid ]);
+    }
+};
 
 // NOTE /containers endpoints are restricted to spodb and production api
 app.delete('/containers/:uuid', function(req, res) {
     C.authorize_req(req, true).then(function(auth) {
         var uuid = req.param('uuid');
 
-        if (inventories[uuid] === undefined) {
-            res.sendStatus(404);
-            return;
-        }
-
-        if (containerAuthorized(uuid, auth.account)) {
-            destroyContainer(uuid);
-            res.sendStatus(204);
-        } else {
-            res.sendStatus(401);
-        }
+        return dao.get(uuid).then(function(container) {
+                if (container !== undefined) {
+                    if (containerAuthorized(container, auth.account)) {
+                        return dao.destroy(uuid).then(function() {
+                            res.sendStatus(204);
+                        });
+                    } else {
+                        res.sendStatus(401);
+                    }
+                } else {
+                    res.sendStatus(404);
+                
+                }
+            });
     }).fail(function(e) {
+        console.log(e);
+        console.log(e.stack);
         res.status(500).send(e.toString());
     }).done();
 });
@@ -56,37 +88,38 @@ app.post('/containers/:uuid', function(req, res) {
     var uuid = req.param('uuid'),
     blueprintID = req.param('blueprint');
 
-    Q.spread([getBlueprints(), C.authorize_req(req, true)], function(blueprints, auth) {
+    Q.spread([C.getBlueprints(), C.authorize_req(req, true), dao.get(uuid)], function(blueprints, auth, container) {
         var blueprint = blueprints[blueprintID];
 
         if (blueprint === undefined) {
             res.status(400).send("Invalid blueprint");
-        } else if (inventories[uuid] !== undefined) {
-            if (containerAuthorized(uuid, auth.account)) {
-                updateContainer(uuid, blueprint);
+        } else if (container !== undefined) {
+            if (containerAuthorized(container, auth.account)) {
+                updateContainer(container, blueprint);
                 res.sendStatus(204);
             } else {
                 console.log(auth.account, "not authorized to update", uuid);
                 res.sendStatus(401);
             }
         } else {
-            buildContainer(uuid, auth.account, blueprint);
-            res.sendStatus(204);
+            return buildContainer(uuid, auth.account, blueprint).then(function() {
+                res.sendStatus(204);
+            });
         }
     }).fail(function(e) {
+        console.log(e);
+        console.log(e.stack);
         res.status(500).send(e.toString());
     }).done();
 });
 
-function containerAuthorized(uuid, account) {
-    var i = inventories[uuid];
-
-    return (i !== undefined && i.account == account);
+function containerAuthorized(container, account) {
+    return (container !== undefined && container.account == account);
 }
 
-function updateContainer(uuid, newBlueprint) {
-    var i = inventories[uuid],
-    b = newBlueprint;
+function updateContainer(container, newBlueprint) {
+    var i = container,
+        b = newBlueprint;
 
     i.blueprint = newBlueprint.uuid;
     i.capacity.cargo = b.inventory_capacity;
@@ -96,7 +129,7 @@ function updateContainer(uuid, newBlueprint) {
 function buildContainer(uuid, account, blueprint) {
     var b = blueprint;
 
-    inventories[uuid] = {
+    return dao.insert(uuid, {
         blueprint: b.uuid,
         account: account,
         capacity: {
@@ -109,32 +142,19 @@ function buildContainer(uuid, account, blueprint) {
         },
         cargo: {},
         hanger: {}
-    };
-}
-
-function destroyContainer(uuid) {
-    if (inventories[uuid] === undefined) {
-        throw new Error("No such inventory");
-    }
-
-    inventories[uuid].tombstone = true;
+    });
 }
 
 app.get('/inventory', function(req, res) {
     C.authorize_req(req).then(function(auth) {
         if (auth.privileged && req.param('all') == 'true') {
-            res.send(inventories);
+            return dao.all().then(function(data) {
+                res.send(data);
+            });
         } else {
-            var my_inventories = {};
-
-            for (var key in inventories) {
-                var i = inventories[key];
-                if (i.account == auth.account) {
-                    my_inventories[key] = i;
-                }
-            }
-
-            res.send(my_inventories);
+            return dao.all(auth.account).then(function(data) {
+                res.send(data);
+            });
         }
     }).fail(function(e) {
         res.status(500).send(e.toString());
@@ -145,9 +165,9 @@ app.get('/inventory', function(req, res) {
 app.get('/inventory/:uuid', function(req, res) {
     var uuid = req.param('uuid');
 
-    C.authorize_req(req).then(function(auth) {
-        if (containerAuthorized(uuid, auth.account)) {
-            res.send(inventories[uuid]);
+    Q.spread([C.authorize_req(req), dao.get(uuid)], function(auth, container) {
+        if (containerAuthorized(container, auth.account)) {
+            res.send(container.doc);
         } else {
             res.sendStatus(401);
         }
@@ -158,7 +178,7 @@ app.get('/inventory/:uuid', function(req, res) {
 });
 
 app.post('/ships/:uuid', function(req, res) {
-    Q.spread([getBlueprints(), C.authorize_req(req, true)], function(blueprints, auth) {
+    Q.spread([C.getBlueprints(), C.authorize_req(req, true)], function(blueprints, auth) {
         var uuid = req.param('uuid');
         var ship = ships[uuid];
 
@@ -217,12 +237,11 @@ app.post('/ships/:uuid', function(req, res) {
 // this unpacks a ship from inventory and makes it unique
 app.post('/ships', function(req, res) {
     var uuid = uuidGen.v1(),
-    inventoryID = req.param('inventory'),
-    sliceID = req.param('slice'),
-    blueprintID = req.param('blueprint'),
-    inventory = inventories[inventoryID];
+        inventoryID = req.param('inventory'),
+        sliceID = req.param('slice'),
+        blueprintID = req.param('blueprint');
 
-    Q.spread([getBlueprints(), C.authorize_req(req)], function(blueprints, auth) {
+    Q.spread([C.getBlueprints(), C.authorize_req(req), dao.get(inventoryID)], function(blueprints, auth, inventory) {
         if (!containerAuthorized(inventoryID, auth.account)) {
             return res.sendStatus(401);
         }
@@ -252,9 +271,9 @@ app.post('/ships', function(req, res) {
 
             slice.unpacked.push(uuid);
 
-            buildContainer(uuid, auth.account, blueprint);
-
-            res.send(ship);
+            return buildContainer(uuid, auth.account, blueprint).then(function() {
+                res.send(ship);
+            });
         }
     }).fail(function(e) {
         console.log(e.stack);
@@ -264,7 +283,7 @@ app.post('/ships', function(req, res) {
 
 // TODO support a schema validation
 app.post('/inventory', function(req, res) {
-    Q.spread([getBlueprints(), C.authorize_req(req)], function(blueprints, auth) {
+    Q.spread([C.getBlueprints(), C.authorize_req(req)], function(blueprints, auth) {
         var dataset = req.body,
         transactions = [],
         containers = [],
@@ -366,30 +385,32 @@ app.post('/inventory', function(req, res) {
         }
 
         // TODO this should all be in postgres and a database transaction
-        containers.forEach(function(c) {
+        var containerP = containers.map(function(c) {
             if (c.container_action == "create") {
-                buildContainer(c.uuid, auth.account, c.blueprint);
+                return buildContainer(c.uuid, auth.account, c.blueprint);
             } else { // destroy ?
-                if (inventories[c.uuid] === undefined) {
-                    throw new Error("no such inventory");
-                }
-
-                destroyContainer(c.uuid);
+                return dao.destroy(c.uuid);
             }
         });
 
-        executeTransfers(transactions);
-
-        return res.sendStatus(204);
+        console.log(containerP);
+        
+        return Q.spread(containerP).
+        then(function() {
+            return executeTransfers(transactions);
+        }).then(function() {
+            res.sendStatus(204);
+        });
     }).fail(function(e) {
         console.log(e); // TODO include request-id
+        console.log(e.stack);
         res.status(500).send(e.toString());
     }).done();
 });
 
 // TODO if there is not enough room, the transaction will fail unbalanced
 function executeTransfers(transfers) {
-    transfers.forEach(function(transfer) {
+    return Q.spread(transfers.map(function(transfer) {
         var example = {
             inventory: 'uuid',
             slice: 'uuid',
@@ -399,74 +420,75 @@ function executeTransfers(transfers) {
         };
         console.log(transfer);
 
-        var slot;
-        var inventory = inventories[transfer.inventory];
-        var quantity = transfer.quantity;
-        var sliceID = transfer.slice;
+        return dao.get(transfer.inventory).then(function(inventory) {
+            var slot;
+            var quantity = transfer.quantity;
+            var sliceID = transfer.slice;
 
-        var type = transfer.blueprint.uuid;
+            var type = transfer.blueprint.uuid;
 
-        if (inventory === undefined) {
-            throw new Error("no such inventory: " + transfer.inventory);
-        }
-
-        if (transfer.blueprint.type == "spaceship") {
-            slot = "hanger";
-
-            if (inventory[slot][sliceID] === undefined) {
-                inventory[slot][sliceID] = {
-                    unpacked: []
-                };
+            if (inventory === undefined) {
+                throw new Error("no such inventory: " + transfer.inventory);
             }
-        } else {
-            slot = "cargo";
 
-            if (inventory[slot][sliceID] === undefined) {
-                inventory[slot][sliceID] = {};
-            }
-        }
+            if (transfer.blueprint.type == "spaceship") {
+                slot = "hanger";
 
-        var slice = inventory[slot][sliceID];
-        var volume = quantity * transfer.blueprint.volume;
-        var final_volume = inventory.usage[slot] + volume;
-
-        if (final_volume > inventory.capacity[slot]) {
-            throw new Error("No room left");
-        }
-
-        if (transfer.ship_uuid !== undefined) {
-            var list = slice.unpacked;
-            if (quantity > 0) {
-                list.push(transfer.ship_uuid);
-
-                ships[transfer.blueprint.uuid].location = transfer.inventory;
-                ships[transfer.blueprint.uuid].slice = transfer.slice;
+                if (inventory[slot][sliceID] === undefined) {
+                    inventory[slot][sliceID] = {
+                        unpacked: []
+                    };
+                }
             } else {
-                var i = list.indexOf(transfer.ship_uuid);
-                var shipRecord = ships[transfer.ship_uuid];
+                slot = "cargo";
 
-                if (i == -1 || shipRecord.location !== transfer.inventory || shipRecord.slice !== transfer.slice) {
-                    throw new Error("ship not present in hanger: " + transfer.ship_uuid);
-                } else {
-                    list.splice(i, 1);
+                if (inventory[slot][sliceID] === undefined) {
+                    inventory[slot][sliceID] = {};
                 }
             }
-        } else {
-            if (slice[type] === undefined) {
-                slice[type] = 0;
+
+            var slice = inventory[slot][sliceID];
+            var volume = quantity * transfer.blueprint.volume;
+            var final_volume = inventory.usage[slot] + volume;
+
+            if (final_volume > inventory.capacity[slot]) {
+                throw new Error("No room left");
             }
 
-            var result = slice[type] + transfer.quantity;
+            if (transfer.ship_uuid !== undefined) {
+                var list = slice.unpacked;
+                if (quantity > 0) {
+                    list.push(transfer.ship_uuid);
 
-            if (result < 0) {
-                throw new Error("Not enough cargo present: "+type);
+                    ships[transfer.blueprint.uuid].location = transfer.inventory;
+                    ships[transfer.blueprint.uuid].slice = transfer.slice;
+                } else {
+                    var i = list.indexOf(transfer.ship_uuid);
+                    var shipRecord = ships[transfer.ship_uuid];
+
+                    if (i == -1 || shipRecord.location !== transfer.inventory || shipRecord.slice !== transfer.slice) {
+                        throw new Error("ship not present in hanger: " + transfer.ship_uuid);
+                    } else {
+                        list.splice(i, 1);
+                    }
+                }
+            } else {
+                if (slice[type] === undefined) {
+                    slice[type] = 0;
+                }
+
+                var result = slice[type] + transfer.quantity;
+
+                if (result < 0) {
+                    throw new Error("Not enough cargo present: "+type);
+                }
+
+                slice[type] = result;
             }
 
-            slice[type] = result;
-        }
-
-        inventory.usage[slot] = final_volume;
-    });
+            inventory.usage[slot] = final_volume;
+        });
+    }));
 }
 
 var server = http.createServer(app);

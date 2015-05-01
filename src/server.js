@@ -1,23 +1,29 @@
 'use strict';
 
-var http = require("http");
-var express = require("express");
-var logger = require('morgan');
-var bodyParser = require('body-parser');
-var uuidGen = require('node-uuid');
-var Q = require('q');
-var qhttp = require("q-io/http");
-var C = require('spacebox-common');
+var http = require("http"),
+    express = require("express"),
+    util = require('util'),
+    npm_debug = require('debug'),
+    log = npm_debug('inv:info'),
+    error = npm_debug('inv:error'),
+    debug = npm_debug('inv:debug'),
+    logger = require('morgan'),
+    bodyParser = require('body-parser'),
+    uuidGen = require('node-uuid'),
+    Q = require('q'),
+    qhttp = require("q-io/http"),
+    C = require('spacebox-common');
 
 var pgpLib = require('pg-promise');
 var pgp = pgpLib(/*options*/);
 var database_url = process.env.DATABASE_URL || process.env.INVENTORY_DATABASE_URL;
 var db = pgp(database_url);
 
+Q.longStackSupport = true;
+
 var app = express();
 var port = process.env.PORT || 5000;
 
-Q.longStackSupport = true;
 
 app.use(logger('dev'));
 app.use(bodyParser.json());
@@ -28,7 +34,6 @@ app.use(bodyParser.urlencoded({
 // TODO inventory will need to keep track of
 // ships and any modules or customization they
 // have. It'll need a seperate root hash.
-var inventories = {};
 var slice_permissions = {};
 var ships = {};
 
@@ -81,11 +86,7 @@ app.delete('/containers/:uuid', function(req, res) {
                 
                 }
             });
-    }).fail(function(e) {
-        console.log(e);
-        console.log(e.stack);
-        res.status(500).send(e.toString());
-    }).done();
+    }).fail(C.http.errHandler(req, res, error)).done();
 });
 
 app.post('/containers/:uuid', function(req, res) {
@@ -96,7 +97,10 @@ app.post('/containers/:uuid', function(req, res) {
         var blueprint = blueprints[blueprintID];
 
         if (blueprint === undefined) {
-            res.status(400).send("Invalid blueprint");
+            throw new C.http.Error(422, "no_such_reference", {
+                name: "blueprint",
+                blueprint: blueprintID
+            });
         } else if (container !== undefined) {
             if (containerAuthorized(container, auth.account)) {
                 updateContainer(container, blueprint).
@@ -112,11 +116,7 @@ app.post('/containers/:uuid', function(req, res) {
                 res.sendStatus(204);
             });
         }
-    }).fail(function(e) {
-        console.log(e);
-        console.log(e.stack);
-        res.status(500).send(e.toString());
-    }).done();
+    }).fail(C.http.errHandler(req, res, error)).done();
 });
 
 function containerAuthorized(container, account) {
@@ -127,13 +127,13 @@ function updateContainer(container, newBlueprint) {
     var i = container.doc,
         b = newBlueprint;
 
-    console.log(i);
+    debug(i);
 
     i.blueprint = newBlueprint.uuid;
     i.capacity.cargo = b.inventory_capacity;
     i.capacity.hanger = b.hanger_capacity;
 
-    console.log(i);
+    debug(i);
 
     return dao.update(container.id, container.doc);
 }
@@ -169,10 +169,7 @@ app.get('/inventory', function(req, res) {
                 res.send(data);
             });
         }
-    }).fail(function(e) {
-        res.status(500).send(e.toString());
-        throw e;
-    }).done();
+    }).fail(C.http.errHandler(req, res, error)).done();
 });
 
 app.get('/inventory/:uuid', function(req, res) {
@@ -184,10 +181,7 @@ app.get('/inventory/:uuid', function(req, res) {
         } else {
             res.sendStatus(401);
         }
-    }).fail(function(e) {
-        res.status(500).send(e.toString());
-        throw e;
-    }).done();
+    }).fail(C.http.errHandler(req, res, error)).done();
 });
 
 app.post('/ships/:uuid', function(req, res) {
@@ -195,8 +189,8 @@ app.post('/ships/:uuid', function(req, res) {
         var uuid = req.param('uuid');
         var ship = ships[uuid];
 
-        console.log(ship);
-        console.log(req.body);
+        debug(ship);
+        debug(req.body);
 
         if (ship === undefined) {
             return res.sendStatus(404);
@@ -234,7 +228,10 @@ app.post('/ships/:uuid', function(req, res) {
                         slice: req.body.slice
                 }]);
             } else {
-                throw new Error("invalid in_space: %s", undock);
+                throw new C.http.Error(400, "invalid_param", {
+                    name: 'in_space',
+                    in_space: undock
+                });
             }
         }
 
@@ -261,15 +258,31 @@ app.post('/ships', function(req, res) {
 
         var blueprint  = blueprints[blueprintID];
 
-        if (inventory === undefined || inventory.hanger[sliceID] === undefined) {
-            res.status(400).send("no such inventory");
+        if (inventory === undefined) {
+            throw new C.http.Error(422, "no_such_reference", {
+                name: "inventory",
+                inventory: inventoryID,
+                slice: sliceID
+            });
+        } else if (inventory.hanger[sliceID] === undefined) {
+            throw new C.http.Error(422, "no_such_reference", {
+                name: "slice",
+                inventory: inventoryID,
+                slice: sliceID
+            });
         } else if (blueprint === undefined) {
-            res.status(400).send("invalid blueprint");
+            throw new C.http.Error(422, "no_such_reference", {
+                name: "blueprint",
+                blueprint: blueprintID
+            });
         } else {
             var slice = inventory.hanger[sliceID];
 
             if (slice[blueprintID] === undefined || slice[blueprintID] === 0) {
-                throw new Error("no ships present: " + blueprintID);
+                throw new C.http.Error(409, "no_such_reference", {
+                    reason: "the ship is not there",
+                    blueprint: blueprintID
+                });
             }
 
             slice[blueprintID] -= 1;
@@ -288,16 +301,12 @@ app.post('/ships', function(req, res) {
                 res.send(ship);
             });
         }
-    }).fail(function(e) {
-        console.log(e);
-        console.log(e.stack);
-        res.status(500).send(e.toString());
-    }).done();
+    }).fail(C.http.errHandler(req, res, error)).done();
 });
 
 // TODO support a schema validation
 app.post('/inventory', function(req, res) {
-    console.log(req.body);
+    debug(req.body);
 
     Q.spread([C.getBlueprints(), C.authorize_req(req)], function(blueprints, auth) {
         var dataset = req.body,
@@ -330,7 +339,11 @@ app.post('/inventory', function(req, res) {
                 old_containers.push(t.uuid);
 
                 if (!containerAuthorized(t.uuid, auth.account)) {
-                    throw new Error("not authorized to delete " + t.uuid);
+                    throw new C.http.Error(403, "unauthorized", {
+                        target: t.uuid,
+                        account: auth.account,
+                        action: 'delete'
+                    });
                 }
             }
 
@@ -342,11 +355,18 @@ app.post('/inventory', function(req, res) {
                 if (t.container_action !== undefined) return;
 
                 if (old_containers.indexOf(t.inventory) > 0) {
-                    throw new Error(t.inventory + " is being deleted");
+                    throw new C.http.Error(422, "invalid_transaction", {
+                        reason: "the container is being deleted",
+                        container: t.inventory
+                    });
                 } else if (new_containers.indexOf(t.inventory) == -1) {
                     return dao.get(t.inventory).then(function(container) {
                         if (!containerAuthorized(container, auth.account)) {
-                            throw new Error(auth.account + " cannot access " + t.inventory);
+                            throw new C.http.Error(403, "unauthorized", {
+                                target: t.inventory,
+                                account: auth.account,
+                                action: 'update'
+                            });
                         }
                     });
                 }
@@ -356,24 +376,46 @@ app.post('/inventory', function(req, res) {
                 if (t.ship_uuid !== undefined) {
                     var shipRecord = ships[t.ship_uuid];
                     if (shipRecord === undefined) {
-                        throw new Error("no such ship: "+t.ship_uuid);
+                        throw new C.http.Error(422, "no_such_reference", {
+                            name: "ship_uuid",
+                            ship_uuid: t.ship_uuid
+                        });
                     } else if(shipRecord.in_space === true) {
-                        throw new Error("that ship is in space and cannot be moved");
+                        throw new C.http.Error(409, "invalid_transaction", {
+                            reason: "the ship is not there",
+                            ship_uuid: t.ship_uuid
+                        });
                     } else {
                         t.blueprint = blueprints[shipRecord.blueprint];
                     }
 
                     if (t.quantity === -1) {
                         if (shipRecord.location !== t.inventory || shipRecord.slice !== t.slice) {
-                            throw new Error("the ship is not there");
+                            throw new C.http.Error(409, "invalid_transaction", {
+                                reason: "the ship is not there",
+                                ship_uuid: t.ship_uuid
+                            });
                         }
                     } else if (t.quantity != 1) {
-                        throw new Error("quantity must be 1 or -1 for unpacked ships");
+                        throw new C.http.Error(400, "invalid_param", {
+                            name: 'quantity',
+                            reason: "quantity must be 1 or -1 for unpacked ships",
+                            ship_uuid: t.ship_uuid,
+                            quantity: t.quantity
+                        });
                     }
                 }
 
-                if (t.blueprint === undefined || (t.blueprint.volume === undefined)) {
-                    throw new Error("invalid blueprint: " + t.blueprint);
+                if (t.blueprint === undefined) {
+                    throw new C.http.Error(422, "no_such_reference", {
+                        name: "blueprint",
+                        blueprint: t.blueprint
+                    });
+                } else if (t.blueprint.volume === undefined) {
+                    throw new C.http.Error(500, "invalid_blueprint", {
+                        reason: "missing the volume attribute",
+                        blueprint: t.blueprint
+                    });
                 }
 
                 if (t.container_action === undefined) {
@@ -403,7 +445,10 @@ app.post('/inventory', function(req, res) {
 
                 for (var key in counters) {
                     if (counters[key] !== 0) {
-                        throw new Error(key + " is not balanced");
+                        throw new C.http.Error(422, "invalid_transaction", {
+                            reason: "unbalanced",
+                            accounting: counters
+                        });
                     }
                 }
             }
@@ -421,11 +466,7 @@ app.post('/inventory', function(req, res) {
         }).then(function() {
             res.sendStatus(204);
         });
-    }).fail(function(e) {
-        console.log(e); // TODO include request-id
-        console.log(e.stack);
-        res.status(500).send(e.toString());
-    }).done();
+    }).fail(C.http.errHandler(req, res, error)).done();
 });
 
 // TODO if there is not enough room, the transaction will fail unbalanced
@@ -453,7 +494,10 @@ function executeTransfers(transfers) {
             var type = transfer.blueprint.uuid;
 
             if (inventory === undefined) {
-                throw new Error("no such inventory: " + transfer.inventory);
+                throw new C.http.Error(422, "no_such_reference", {
+                    name: "inventory",
+                    inventory: transfer.inventory
+                });
             }
 
             if (transfer.blueprint.type == "spaceship") {
@@ -477,7 +521,11 @@ function executeTransfers(transfers) {
             var final_volume = inventory.usage[slot] + volume;
 
             if (final_volume > inventory.capacity[slot]) {
-                throw new Error("No room left");
+                throw new C.http.Error(409, "not_enough_space", {
+                    inventory: data.id,
+                    final_volume: final_volume,
+                    capacity: inventory.capacity[slot]
+                });
             }
 
             if (transfer.ship_uuid !== undefined) {
@@ -492,7 +540,10 @@ function executeTransfers(transfers) {
                     var shipRecord = ships[transfer.ship_uuid];
 
                     if (i == -1 || shipRecord.location !== transfer.inventory || shipRecord.slice !== transfer.slice) {
-                        throw new Error("ship not present in hanger: " + transfer.ship_uuid);
+                        throw new C.http.Error(422, "no_such_reference", {
+                            name: "ship_uuid",
+                            ship_uuid: transfer.ship_uuid
+                        });
                     } else {
                         list.splice(i, 1);
                     }
@@ -505,7 +556,12 @@ function executeTransfers(transfers) {
                 var result = slice[type] + transfer.quantity;
 
                 if (result < 0) {
-                    throw new Error("Not enough cargo present: "+type);
+                    throw new C.http.Error(409, "invalid_transaction", {
+                        reason: "Not enough cargo present",
+                        blueprint: type,
+                        desired: transfer.quantity,
+                        contents: slice
+                    });
                 }
 
                 slice[type] = result;

@@ -99,8 +99,10 @@ app.post('/containers/:uuid', function(req, res) {
             res.status(400).send("Invalid blueprint");
         } else if (container !== undefined) {
             if (containerAuthorized(container, auth.account)) {
-                updateContainer(container, blueprint);
-                res.sendStatus(204);
+                updateContainer(container, blueprint).
+                    then(function() {
+                        res.sendStatus(204);
+                    });
             } else {
                 console.log(auth.account, "not authorized to update", uuid);
                 res.sendStatus(401);
@@ -122,12 +124,18 @@ function containerAuthorized(container, account) {
 }
 
 function updateContainer(container, newBlueprint) {
-    var i = container,
+    var i = container.doc,
         b = newBlueprint;
+
+    console.log(i);
 
     i.blueprint = newBlueprint.uuid;
     i.capacity.cargo = b.inventory_capacity;
     i.capacity.hanger = b.hanger_capacity;
+
+    console.log(i);
+
+    return dao.update(container.id, container.doc);
 }
 
 function buildContainer(uuid, account, blueprint) {
@@ -289,6 +297,8 @@ app.post('/ships', function(req, res) {
 
 // TODO support a schema validation
 app.post('/inventory', function(req, res) {
+    console.log(req.body);
+
     Q.spread([C.getBlueprints(), C.authorize_req(req)], function(blueprints, auth) {
         var dataset = req.body,
             transactions = [],

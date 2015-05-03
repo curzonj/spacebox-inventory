@@ -340,7 +340,7 @@ app.post('/inventory', function(req, res) {
 
                 if (!containerAuthorized(t.uuid, auth.account)) {
                     throw new C.http.Error(403, "unauthorized", {
-                        target: t.uuid,
+                        container: t.uuid,
                         account: auth.account,
                         action: 'delete'
                     });
@@ -363,7 +363,7 @@ app.post('/inventory', function(req, res) {
                     return dao.get(t.inventory).then(function(container) {
                         if (!containerAuthorized(container, auth.account)) {
                             throw new C.http.Error(403, "unauthorized", {
-                                target: t.inventory,
+                                container: t.inventory,
                                 account: auth.account,
                                 action: 'update'
                             });

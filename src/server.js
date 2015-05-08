@@ -18,6 +18,11 @@ var http = require("http"),
 db.select('inventory')
 Q.longStackSupport = true
 
+C.configure({
+    AUTH_URL: process.env.AUTH_URL,
+    credentials: process.env.INTERNAL_CREDS,
+})
+
 var app = express()
 var port = process.env.PORT || 5000
 

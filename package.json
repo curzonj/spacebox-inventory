@@ -19,6 +19,7 @@
     "express": "latest"
   },
   "jshintConfig": {
-    "node": true
+    "node": true,
+    "asi": true
   }
 }

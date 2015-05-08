@@ -1,3 +1,5 @@
+CREATE EXTENSION "uuid-ossp";
+
 CREATE TABLE inventories (
     id uuid PRIMARY KEY,
     account uuid not null,

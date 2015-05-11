@@ -76,7 +76,7 @@ app.delete('/containers/:uuid', function(req, res) {
 
         return dao.get(uuid).then(function(container) {
                 if (container !== undefined) {
-                    if (containerAuthorized(container, auth.account)) {
+                    if (containerAuthorized(container, auth)) {
                         return dao.destroy(uuid).then(function() {
                             res.sendStatus(204)
                         })
@@ -104,7 +104,7 @@ app.post('/containers/:uuid', function(req, res) {
                 blueprint: blueprintID
             })
         } else if (container !== undefined) {
-            if (containerAuthorized(container, auth.account)) {
+            if (containerAuthorized(container, auth)) {
                 updateContainer(container, blueprint).
                     then(function() {
                         res.sendStatus(204)
@@ -121,8 +121,11 @@ app.post('/containers/:uuid', function(req, res) {
     }).fail(C.http.errHandler(req, res, error)).done()
 })
 
-function containerAuthorized(container, account) {
-    return (container !== undefined && container.account == account)
+function containerAuthorized(container, auth) {
+    var result = (container !== undefined && container.account == auth.account)
+    if (!result)
+        debug(auth.account, 'not granted access to', container)
+    return result
 }
 
 function updateContainer(container, newBlueprint) {
@@ -142,6 +145,8 @@ function updateContainer(container, newBlueprint) {
 
 function buildContainer(uuid, account, blueprint) {
     var b = blueprint
+
+    debug("building", uuid, "for", account)
 
     return dao.insert(uuid, {
         uuid: uuid,
@@ -178,7 +183,7 @@ app.get('/inventory/:uuid', function(req, res) {
     var uuid = req.param('uuid')
 
     Q.spread([C.http.authorize_req(req), dao.get(uuid)], function(auth, container) {
-        if (containerAuthorized(container, auth.account)) {
+        if (containerAuthorized(container, auth)) {
             res.send(container.doc)
         } else {
             res.sendStatus(401)
@@ -206,7 +211,7 @@ app.post('/ships/:uuid', function(req, res) {
 
         if (undock !== undefined) {
             if (undock === true) {
-                if (!containerAuthorized(ship.location, auth.account)) {
+                if (!containerAuthorized(ship.location, auth)) {
                     return res.sendStatus(401)
                 }
 
@@ -218,7 +223,7 @@ app.post('/ships/:uuid', function(req, res) {
                         slice: ship.slice
                 }])
             } else if (undock === false) {
-                if (!containerAuthorized(req.body.location, auth.account)) {
+                if (!containerAuthorized(req.body.location, auth)) {
                     return res.sendStatus(401)
                 }
 
@@ -254,7 +259,7 @@ app.post('/ships', function(req, res) {
         blueprintID = req.param('blueprint')
 
     Q.spread([C.getBlueprints(), C.http.authorize_req(req), dao.get(inventoryID)], function(blueprints, auth, inventory) {
-        if (!containerAuthorized(inventoryID, auth.account)) {
+        if (!containerAuthorized(inventoryID, auth)) {
             return res.sendStatus(401)
         }
 
@@ -317,6 +322,8 @@ app.post('/inventory', function(req, res) {
             new_containers = [],
             old_containers = []
 
+        debug('processing transaction for', auth)
+
         dataset.forEach(function(t) {
             t.blueprint = blueprints[t.blueprint]
         })
@@ -340,7 +347,7 @@ app.post('/inventory', function(req, res) {
             } else {
                 old_containers.push(t.uuid)
 
-                if (!containerAuthorized(t.uuid, auth.account)) {
+                if (!containerAuthorized(t.uuid, auth)) {
                     throw new C.http.Error(403, "unauthorized", {
                         container: t.uuid,
                         account: auth.account,
@@ -363,7 +370,7 @@ app.post('/inventory', function(req, res) {
                     })
                 } else if (new_containers.indexOf(t.inventory) == -1) {
                     return dao.get(t.inventory).then(function(container) {
-                        if (!containerAuthorized(container, auth.account)) {
+                        if (!containerAuthorized(container, auth)) {
                             throw new C.http.Error(403, "unauthorized", {
                                 container: t.inventory,
                                 account: auth.account,
